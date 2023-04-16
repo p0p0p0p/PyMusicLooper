@@ -1,3 +1,14 @@
+## Fork notes
+
+This should be called with `python -m pymusiclooper -i --stdout '.\My Song.mp3'` to print one strong candidate and one weak candidate for loop points. Example output:
+
+```
+Discovered loop points:
+  0) from 02:41.205 back to 00:18.982; score: 99.88%
+  1) from 01:47.683 back to 00:18.797; score: 98.42%
+828928 4748800
+```
+
 # PyMusicLooper
 
 A python script for repeating music seamlessly and endlessly, by automatically finding the best loop points.

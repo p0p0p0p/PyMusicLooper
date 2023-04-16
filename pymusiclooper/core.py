@@ -94,6 +94,10 @@ class MusicLooper:
         hi_weights = _geometric_weights(hi_test_offset, start=hi_test_offset // num_test_beats)
         lo_weights = _geometric_weights(lo_test_offset, start=lo_test_offset // num_test_beats)
 
+        runtime_end = time.time()
+        prep_time = runtime_end - runtime_start
+        logging.info("Finished initial audio processing in {:.3}s".format(prep_time))
+
         candidate_pairs = []
 
         deviation = np.linalg.norm(chroma[..., beats] * 0.085, axis=0)
@@ -101,7 +105,7 @@ class MusicLooper:
         for idx, loop_end in enumerate(beats):
             for loop_start in beats:
                 loop_len = loop_end - loop_start
-                if loop_len < min_duration:
+                if loop_len < min_duration or loop_len > max_duration:
                     break
                 dist = np.linalg.norm(chroma[..., loop_end] - chroma[..., loop_start])
                 if dist <= deviation[idx]:
@@ -159,10 +163,6 @@ class MusicLooper:
 
         if not candidate_pairs:
             raise LoopNotFoundError(f'No loop points found for {self.filename} with current parameters.')
-
-        runtime_end = time.time()
-        prep_time = runtime_end - runtime_start
-        logging.info("Finished initial audio processing in {:.3}s".format(prep_time))
 
         # candidate_pairs = self._dB_prune(candidate_pairs)
 
