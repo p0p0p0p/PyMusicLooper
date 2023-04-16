@@ -13,7 +13,7 @@ from .exceptions import LoopNotFoundError, AudioLoadError
 
 
 class MusicLooper:
-    def __init__(self, filepath, min_duration_multiplier=0.35, trim=True):
+    def __init__(self, filepath, min_duration_multiplier=0.3, trim=True):
         # Load the file if it exists
         # dtype and subsequent type cast are workarounds for a libsnd bug; see https://github.com/librosa/librosa/issues/1622 and https://github.com/bastibe/python-soundfile/issues/349
         raw_audio, sampling_rate = librosa.load(filepath, sr=None, mono=False, dtype=None)
@@ -70,10 +70,29 @@ class MusicLooper:
         logging.info("Detected {} beats at {:.0f} bpm".format(beats.size, bpm))
 
         min_duration = int(chroma.shape[-1] * self.min_duration_multiplier)
+        max_duration = int(chroma.shape[-1] * 0.7)
+        hi_threshold = 0.99
+        lo_threshold = 0.95
+        hi_pair = None
+        lo_pair = None
+        lower_test_ratio = 0.7
+        upper_test_ratio = 1.05
 
-        runtime_end = time.time()
-        prep_time = runtime_end - runtime_start
-        logging.info("Finished initial audio processing in {:.3}s".format(prep_time))
+        beats_per_second = bpm / 60
+        num_test_beats = 12
+        hi_seconds_to_test = max(num_test_beats / beats_per_second, 20)
+        hi_test_offset = librosa.samples_to_frames(int(hi_seconds_to_test * self.rate))
+        lo_seconds_to_test = max(num_test_beats / beats_per_second, 5)
+        lo_test_offset = librosa.samples_to_frames(int(lo_seconds_to_test * self.rate))
+
+        # adjust offset for very short tracks to 25% of its length
+        if hi_test_offset > chroma.shape[-1]:
+            hi_test_offset = chroma.shape[-1] // 4
+        if lo_test_offset > chroma.shape[-1]:
+            lo_test_offset = chroma.shape[-1] // 4
+            
+        hi_weights = _geometric_weights(hi_test_offset, start=hi_test_offset // num_test_beats)
+        lo_weights = _geometric_weights(lo_test_offset, start=lo_test_offset // num_test_beats)
 
         candidate_pairs = []
 
@@ -81,63 +100,80 @@ class MusicLooper:
 
         for idx, loop_end in enumerate(beats):
             for loop_start in beats:
-                if loop_end - loop_start < min_duration:
+                loop_len = loop_end - loop_start
+                if loop_len < min_duration:
                     break
                 dist = np.linalg.norm(chroma[..., loop_end] - chroma[..., loop_start])
                 if dist <= deviation[idx]:
                     db_diff = self.db_diff(
                         power_db[..., loop_end], power_db[..., loop_start]
                     )
-                    if db_diff <= 1.5:
-                        candidate_pairs.append(
-                            {
-                                "loop_start": loop_start,
-                                "loop_end": loop_end,
-                                "dB_diff": db_diff,
-                                "dist": (dist / deviation[idx])
-                            }
+                    if db_diff <= 5:
+                        hi_score = self._pair_score(
+                            loop_start,
+                            loop_end,
+                            chroma,
+                            test_duration=hi_test_offset,
+                            weights=hi_weights,
                         )
+                        new_hi_pair = {
+                            "loop_start": loop_start,
+                            "loop_end": loop_end,
+                            "dB_diff": db_diff,
+                            "dist": (dist / deviation[idx]),
+                            "score": hi_score
+                        }
+                        if hi_score >= hi_threshold:
+                            if not hi_pair:
+                                hi_pair = new_hi_pair
+                            elif loop_len < lower_test_ratio * (hi_pair['loop_end'] - hi_pair['loop_start']):
+                                hi_pair = new_hi_pair
+                            elif loop_len < upper_test_ratio * (hi_pair['loop_end'] - hi_pair['loop_start']) and loop_start < hi_pair['loop_start']:
+                                hi_pair = new_hi_pair
+                        lo_score = self._pair_score(
+                            loop_start,
+                            loop_end,
+                            chroma,
+                            test_duration=lo_test_offset,
+                            weights=lo_weights,
+                        )
+                        new_lo_pair = {
+                            "loop_start": loop_start,
+                            "loop_end": loop_end,
+                            "dB_diff": db_diff,
+                            "dist": (dist / deviation[idx]),
+                            "score": lo_score
+                        }
+                        if lo_score >= lo_threshold:
+                            if not lo_pair:
+                                lo_pair = new_lo_pair
+                            elif loop_len < lower_test_ratio * (lo_pair['loop_end'] - lo_pair['loop_start']):
+                                lo_pair = new_lo_pair
+                            elif loop_len < upper_test_ratio * (lo_pair['loop_end'] - lo_pair['loop_start']) and loop_start < lo_pair['loop_start']:
+                                lo_pair = new_lo_pair
+
+        if hi_pair: candidate_pairs.append(hi_pair)
+        if lo_pair: candidate_pairs.append(lo_pair)
 
         logging.info(f"Found {len(candidate_pairs)} possible loop points")
 
         if not candidate_pairs:
             raise LoopNotFoundError(f'No loop points found for {self.filename} with current parameters.')
 
-        beats_per_second = bpm / 60
-        num_test_beats = 12
-        seconds_to_test = num_test_beats / beats_per_second
-        test_offset = librosa.samples_to_frames(int(seconds_to_test * self.rate))
+        runtime_end = time.time()
+        prep_time = runtime_end - runtime_start
+        logging.info("Finished initial audio processing in {:.3}s".format(prep_time))
 
-        # adjust offset for very short tracks to 25% of its length
-        if test_offset > chroma.shape[-1]:
-            test_offset = chroma.shape[-1] // 4
+        # candidate_pairs = self._dB_prune(candidate_pairs)
 
-        candidate_pairs = self._dB_prune(candidate_pairs)
-
-        weights = _geometric_weights(test_offset, start=test_offset // num_test_beats)
-        pair_score_list = [
-            self._pair_score(
-                pair["loop_start"],
-                pair["loop_end"],
-                chroma,
-                test_duration=test_offset,
-                weights=weights,
-            )
-            for pair in candidate_pairs
-        ]
-
-        # Add cosine similarity as score
-        for pair, score in zip(candidate_pairs, pair_score_list):
-            pair["score"] = score
-
-        candidate_pairs = self._score_prune(candidate_pairs)
+        # candidate_pairs = self._score_prune(candidate_pairs)
 
         # re-sort based on new score
-        candidate_pairs = sorted(candidate_pairs, reverse=True, key=lambda x: x["score"])
+        # candidate_pairs = sorted(candidate_pairs, reverse=True, key=lambda x: x["score"])
 
         # prefer longer loops for highly similar sequences
-        if len(candidate_pairs) > 1:
-            self._prioritize_duration(candidate_pairs)
+        # if len(candidate_pairs) > 1:
+        #     self._prioritize_duration(candidate_pairs)
 
         if self.trim_offset:
             for pair in candidate_pairs:

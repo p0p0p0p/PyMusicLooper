@@ -101,7 +101,8 @@ def cli_main():
                 print("\nOperation terminated by user. Exiting.")
                 sys.exit(0)
 
-        selected_index = get_user_input()
+        # selected_index = get_user_input()
+        selected_index = 0
         return selected_index
 
     def choose_loop_pair(loop_pair_list, file_path):
